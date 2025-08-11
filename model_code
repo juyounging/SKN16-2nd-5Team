@@ -1,1 +1,294 @@
+# -*- coding: utf-8 -*-
+"""
+Churn 모델 비교 (누수 없는 Optuna + CV)
+- 필요 패키지(미설치 시): pip install optuna xgboost lightgbm catboost
+- 입력: data/Political_Party_Churn_Data.csv  (경로 필요시 수정)
+- 출력: images/model_accuracy.png, images/model_roc.png
+"""
 
+import os
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
+
+from sklearn.linear_model import LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
+
+import optuna
+import matplotlib.pyplot as plt
+
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+# ---------------------------------------------------------------------
+# 0) 경로/출력 폴더
+# ---------------------------------------------------------------------
+DATA_PATH = os.path.join("data", "Political_Party_Churn_Data.csv")  # 필요 시 수정
+IMG_DIR = os.path.join("images")
+os.makedirs(IMG_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------------
+# 1) 데이터 로드 & 전처리 (라벨 인코딩만, 스케일은 파이프라인에서)
+# ---------------------------------------------------------------------
+df = pd.read_csv(DATA_PATH)
+if "MemberID" in df.columns:
+    df = df.drop(columns=["MemberID"])
+
+for col in df.select_dtypes(include="object"):
+    df[col] = LabelEncoder().fit_transform(df[col].astype(str))
+
+X = df.drop("Churn", axis=1)
+y = df["Churn"].astype(int)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
+)
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+# ---------------------------------------------------------------------
+# 2) 각 모델 Optuna 목적함수 (파이프라인 + CV 평균 accuracy)
+# ---------------------------------------------------------------------
+def tune_with_optuna(make_estimator, param_space, n_trials=40):
+    def objective(trial):
+        params = {k: sampler(trial) for k, sampler in param_space.items()}
+        pipe = Pipeline([
+            ("scaler", MinMaxScaler()),
+            ("clf", make_estimator(**params))
+        ])
+        scores = cross_val_score(pipe, X_train, y_train, cv=cv, scoring="accuracy", n_jobs=-1)
+        return scores.mean()
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return study
+
+
+def sf_float(name, low, high, log=False):
+    return lambda t: t.suggest_float(name, low, high, log=log)
+
+def sf_int(name, low, high):
+    return lambda t: t.suggest_int(name, low, high)
+
+def sf_cat(name, choices):
+    return lambda t: t.suggest_categorical(name, choices)
+
+# ---- 모델별 파라미터 공간 정의 ----
+spaces = {
+    "LogisticRegression": (
+        LogisticRegression,
+        {
+            "C": sf_float("C", 1e-3, 10, log=True),
+            "solver": sf_cat("solver", ["lbfgs", "liblinear"]),
+            "max_iter": lambda _: 500
+        }
+    ),
+    "RidgeClassifier": (
+        RidgeClassifier,
+        {
+            "alpha": sf_float("alpha", 1e-3, 10, log=True)
+        }
+    ),
+    "SGDClassifier": (
+        SGDClassifier,
+        {
+            "alpha": sf_float("alpha", 1e-5, 1e-2, log=True),
+            "loss": sf_cat("loss", ["hinge", "log_loss"]),
+            "max_iter": lambda _: 1000,
+            "tol": lambda _: 1e-3,
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+    "Perceptron": (
+        Perceptron,
+        {
+            "eta0": sf_float("eta0", 1e-4, 1.0, log=True),
+            "max_iter": lambda _: 1000,
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+    "DecisionTree": (
+        DecisionTreeClassifier,
+        {
+            "max_depth": sf_int("max_depth", 2, 16),
+            "min_samples_split": sf_int("min_samples_split", 2, 20),
+            "min_samples_leaf": sf_int("min_samples_leaf", 1, 10),
+            "criterion": sf_cat("criterion", ["gini", "entropy", "log_loss"]),
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+    "RandomForest": (
+        RandomForestClassifier,
+        {
+            "n_estimators": sf_int("n_estimators", 100, 800),
+            "max_depth": sf_int("max_depth", 2, 20),
+            "min_samples_split": sf_int("min_samples_split", 2, 20),
+            "min_samples_leaf": sf_int("min_samples_leaf", 1, 10),
+            "random_state": lambda _: RANDOM_STATE,
+            "n_jobs": lambda _: -1
+        }
+    ),
+    "GradientBoosting": (
+        GradientBoostingClassifier,
+        {
+            "n_estimators": sf_int("n_estimators", 100, 800),
+            "max_depth": sf_int("max_depth", 2, 6),
+            "learning_rate": sf_float("learning_rate", 1e-3, 0.2, log=True)
+        }
+    ),
+    "AdaBoost": (
+        AdaBoostClassifier,
+        {
+            "n_estimators": sf_int("n_estimators", 50, 600),
+            "learning_rate": sf_float("learning_rate", 1e-3, 1.0, log=True),
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+    "SVC": (
+        SVC,
+        {
+            "C": sf_float("C", 0.01, 10, log=True),
+            "kernel": sf_cat("kernel", ["linear", "rbf", "poly"]),
+            "probability": lambda _: True,
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+    "MLPClassifier": (
+        MLPClassifier,
+        {
+            "hidden_layer_sizes": lambda t: (t.suggest_int("h1", 32, 128),
+                                             t.suggest_int("h2", 16, 64)),
+            "max_iter": lambda _: 300,
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+    "XGBoost": (
+        XGBClassifier,
+        {
+            "n_estimators": sf_int("n_estimators", 200, 1200),
+            "max_depth": sf_int("max_depth", 2, 10),
+            "learning_rate": sf_float("learning_rate", 1e-3, 0.2, log=True),
+            "subsample": sf_float("subsample", 0.6, 1.0),
+            "colsample_bytree": sf_float("colsample_bytree", 0.6, 1.0),
+            "eval_metric": lambda _: "logloss",
+            "random_state": lambda _: RANDOM_STATE,
+            "n_jobs": lambda _: -1
+        }
+    ),
+    "LightGBM": (
+        LGBMClassifier,
+        {
+            "n_estimators": sf_int("n_estimators", 200, 1200),
+            "num_leaves": sf_int("num_leaves", 15, 255),
+            "max_depth": sf_int("max_depth", -1, 12),
+            "learning_rate": sf_float("learning_rate", 1e-3, 0.2, log=True),
+            "subsample": sf_float("subsample", 0.6, 1.0),
+            "colsample_bytree": sf_float("colsample_bytree", 0.6, 1.0),
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+    "CatBoost": (
+        CatBoostClassifier,
+        {
+            "iterations": sf_int("iterations", 300, 1500),
+            "depth": sf_int("depth", 2, 10),
+            "learning_rate": sf_float("learning_rate", 1e-3, 0.2, log=True),
+            "verbose": lambda _: 0,
+            "random_state": lambda _: RANDOM_STATE
+        }
+    ),
+}
+
+# ---------------------------------------------------------------------
+# 3) 튜닝 & 학습 & 테스트 평가
+# ---------------------------------------------------------------------
+studies = {}
+for name, (maker, space) in spaces.items():
+    print(f"[Optuna] Tuning {name} ...")
+    studies[name] = tune_with_optuna(maker, space, n_trials=40)
+
+# 최종 훈련(Train 전체) -> Test 평가
+results = {}
+fitted_models = {}
+
+def proba_or_decision(model, X):
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(X)[:, 1]
+    if hasattr(model, "decision_function"):
+        return model.decision_function(X)
+    # 확률이 없으면 강제로 0/1 출력 사용(ROC엔 비권장이지만 fallback)
+    return model.predict(X)
+
+for name, (maker, space) in spaces.items():
+    best_params = studies[name].best_trial.params
+    est = maker(**best_params)
+    pipe = Pipeline([("scaler", MinMaxScaler()), ("clf", est)])
+    pipe.fit(X_train, y_train)
+    fitted_models[name] = pipe
+
+    y_prob = proba_or_decision(pipe, X_test)
+    y_pred = (y_prob > 0.5).astype(int) if y_prob.ndim == 1 else y_prob
+    acc = accuracy_score(y_test, y_pred)
+    try:
+        auc = roc_auc_score(y_test, y_prob)
+    except Exception:
+        auc = np.nan
+
+    results[name] = {"accuracy": acc, "auc": auc}
+
+# ---------------------------------------------------------------------
+# 4) 시각화 저장
+# ---------------------------------------------------------------------
+# Accuracy Bar Plot
+acc_sorted = sorted(((k, v["accuracy"]) for k, v in results.items()), key=lambda x: x[1])
+plt.figure(figsize=(10, 8))
+plt.barh([k for k, _ in acc_sorted], [v for _, v in acc_sorted])
+for i, (_, v) in enumerate(acc_sorted):
+    plt.text(v + 0.005, i, f"{v:.3f}", va="center", fontsize=10)
+plt.xlabel("Accuracy")
+plt.title("Model Accuracy (Optuna + CV tuned)")
+plt.xlim(0, 1)
+plt.tight_layout()
+plt.savefig(os.path.join(IMG_DIR, "model_accuracy.png"), dpi=160)
+plt.close()
+
+# ROC Curves
+plt.figure(figsize=(10, 10))
+for name, pipe in fitted_models.items():
+    try:
+        y_score = proba_or_decision(pipe, X_test)
+        fpr, tpr, _ = roc_curve(y_test, y_score)
+        auc = roc_auc_score(y_test, y_score)
+        plt.plot(fpr, tpr, lw=2, label=f"{name} (AUC={auc:.3f})")
+    except Exception:
+        continue
+plt.plot([0, 1], [0, 1], "k--", lw=1)
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curves (Test)")
+plt.legend(fontsize=9)
+plt.tight_layout()
+plt.savefig(os.path.join(IMG_DIR, "model_roc.png"), dpi=160)
+plt.close()
+
+# ---------------------------------------------------------------------
+# 5) 결과 표 출력
+# ---------------------------------------------------------------------
+out = pd.DataFrame(results).T.sort_values("accuracy", ascending=False)
+print("\n=== Test Performance ===")
+print(out.round(4))
+print(f"\nSaved figures to: {os.path.abspath(IMG_DIR)}")

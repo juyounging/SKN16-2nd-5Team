@@ -188,7 +188,8 @@ Churn과 다른 변수 간의 상관관계를 정렬해 분석한 그래프입�
 모델 예측 결과는 테이블 형태로 표시되며, CSV 파일로 저장도 가능합니다.
 
 <p align="center">
-  <img src="images/스트림릿_예측.png" width="80%">
+    <img width="1915" height="893" alt="예측 모델링" src="https://github.com/user-attachments/assets/398d2567-78e1-4ac3-8a94-05ed5928d91a" />
+
 </p>
 
 ---
@@ -208,6 +209,16 @@ Optuna 튜닝 기능을 통해 최적의 성능을 가진 모델 구성이 가�
 
 예측에 사용된 모델명, 피처, 성능 지표 (Accuracy, F1 Score, Precision, Recall) 를 자동으로 저장하며  
 히스토리 테이블을 통해 모델 간 성능을 직관적으로 비교할 수 있습니다.
+
+<p align="center">
+  <img src="images/스트림릿_예측.png" width="80%">
+</p>
+
+---
+
+### 🔹 고객 세그멘테이션 및 이탈 예측
+
+실제 고객 데이터를 업로드하면 고객의 이탈율을 산출할 수 있습니다.
 
 <p align="center">
   <img src="images/스트림릿.png" width="80%">

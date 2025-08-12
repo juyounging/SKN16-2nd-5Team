@@ -208,7 +208,8 @@ Optuna 기반 하이퍼파라미터 튜닝 기능을 통해 최적화된 모델 
 모델의 분류 성능을 상세하게 검증할 수 있습니다.
 
 <p align="center">
-  <img src="images/모델예측결과.png" width="80%">
+  <img width="1915" height="893" alt="image" src="https://github.com/user-attachments/assets/46dd10df-21da-4889-8479-292931dcd32d" />
+
 </p>
 
 ---
